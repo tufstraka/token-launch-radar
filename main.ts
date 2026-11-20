@@ -2,7 +2,7 @@
 //
 // This entry is a Node 22 program with no dependencies. It reads the sealed snapshot from
 // /input/snapshot.json (or --input <file|directory>), scores every pre-token protocol with the
-// name-agnostic model in lib/model.ts, and writes:
+// benchmark model in lib/model.ts, and writes:
 //
 //   /output/board.json      every ranked row, its factors and its farm plan
 //   /output/data.js         the same dataset as one script beside dashboard/
@@ -114,6 +114,7 @@ writeFileSync(
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
-    `token radar: ${radar.aged_two_years} rows aged 2y+, median TVL $${radar.median_tvl_usd.toLocaleString('en-US')}, total implied $${radar.total_implied_usd.toLocaleString('en-US')}\n` +
+    `token radar: ${radar.aged_two_years} rows aged 2y+, median TVL $${radar.median_tvl_usd.toLocaleString('en-US')}, global median mcap/TVL ${radar.global_median_mcap_tvl.toFixed(2)}x over ${radar.benchmark_sample_size} live peers\n` +
+    `token radar: total implied $${radar.total_implied_usd.toLocaleString('en-US')}\n` +
     `token radar: wrote board.json, data.js, dashboard/ (${dashboard.length} files), screenshots/ (${shots.length} images) and dossier.json to ${out}\n`,
 );

@@ -1,23 +1,28 @@
-// TOKEN RADAR: the pre-token value model and the ranked board.
+// TOKEN RADAR: the benchmark-driven pre-token value model and the ranked board.
 //
 // Every protocol is scored by one name-agnostic function of the snapshot's own figures:
 //
-//   implied = round(tvl_usd x base_multiple x category_factor x growth_factor x tenure_factor x breadth_factor)
+//   implied = round(tvl_usd x benchmark x growth_factor x tenure_factor x breadth_factor)
 //
-//   base_multiple  = 0.30, the share of TVL a launch is assumed to capitalise
-//   category_factor= the protocol's `category` only, from CATEGORY_FACTORS (never a slug or name)
-//   growth_factor  = 1 + clamp(change_7d, -50, 150) / 100 x 0.35      (null change_7d = 1)
-//   tenure_factor  = (0.85 + 0.35 x min(age_days, 1095) / 1095)
-//                    x min(1.20, 1 + 0.12 x log10(1 + age_days / 180))  (null age = 365)
+// The category benchmark is not a hand-set table. It is learned from the protocols in this
+// snapshot whose token already trades, by market cap over TVL:
+//
+//   ratio(category) = median(mcap_usd / tvl_usd) over live-token protocols in that category
+//   benchmark(cat)  = (n x median_cat + 5 x global_median) / (n + 5), clamped to [0.05, 6]
+//
+// Five pseudo-peers shrink a thin category toward the whole live market; a category with no live
+// peer takes the global median. The protocol's `category` alone selects the row, never its name or
+// slug. Growth, tenure and breadth then adjust that market multiple:
+//
+//   growth_factor  = 1 + clamp(change_7d, -50, 150) / 100 x 0.35      (null change = 1)
+//   tenure_factor  = min(1.25, (0.90 + 0.30 x min(age_days, 1095) / 1095)
+//                              x (1 + 0.10 x log10(1 + age_days / 180)))  (null age = 365 days)
 //   breadth_factor = 1 + 0.03 x min(chains.length, 6)
 //
-// Longer time with no token raises tenure: the protocol is launch-ready and has survived. Category
-// shapes the multiple because a chain or a DEX monetises TVL differently from a curator vault. Nothing
-// keys on a protocol's name, and the same function scores every row.
-//
-// The board holds every watchlist slug plus the below-floor pre-token protocols with the most TVL, so it
-// is 200 rows on this snapshot. Protocols whose token already trades are kept in a separate `live` list
-// with their market caps; they are never mixed into the ranked board.
+// Longer time with no token raises tenure: the protocol is launch-ready and has survived. The board
+// holds every watchlist slug plus the 160 highest-TVL pre-token protocols below the floor, so it is
+// 200 rows on this snapshot. Protocols whose token already trades are kept in a separate `live` list
+// with their market caps and their own mcap/TVL ratio; they are never mixed into the ranked board.
 
 /** The snapshot's protocol entry: exactly the ten fields the sealed input carries. */
 export interface SnapshotProtocol {
@@ -44,7 +49,6 @@ export interface Snapshot {
 
 /** The model's constants, stated in the dashboard and used by every row. */
 export interface ModelConstants {
-  base_multiple: number;
   growth_weight: number;
   growth_floor: number;
   growth_cap: number;
@@ -53,57 +57,51 @@ export interface ModelConstants {
   tenure_days: number;
   tenure_bonus: number;
   tenure_bonus_cap: number;
+  tenure_bonus_days: number;
   breadth_weight: number;
   breadth_cap: number;
   unknown_age_days: number;
+  shrink_prior: number;
+  benchmark_floor: number;
+  benchmark_cap: number;
 }
 
 export const MODEL: ModelConstants = {
-  base_multiple: 0.3,
   growth_weight: 0.35,
   growth_floor: -50,
   growth_cap: 150,
-  tenure_base: 0.85,
-  tenure_range: 0.35,
+  tenure_base: 0.9,
+  tenure_range: 0.3,
   tenure_days: 1095,
-  tenure_bonus: 0.12,
-  tenure_bonus_cap: 1.2,
+  tenure_bonus: 0.1,
+  tenure_bonus_cap: 1.25,
+  tenure_bonus_days: 180,
   breadth_weight: 0.03,
   breadth_cap: 6,
   unknown_age_days: 365,
+  shrink_prior: 5,
+  benchmark_floor: 0.05,
+  benchmark_cap: 6,
 };
 
-/** The category multiple table. The protocol's `category` alone selects a row; names never do. */
-export const CATEGORY_FACTORS: ReadonlyArray<readonly [string, number]> = [
-  ['Chain', 2.4],
-  ['Dexs', 1.35],
-  ['Perps', 1.25],
-  ['Lending', 1.15],
-  ['RWA', 0.95],
-  ['CDP', 0.95],
-  ['Collateral Markets', 0.9],
-  ['Payments', 0.85],
-  ['CeDeFi', 0.85],
-  ['Restaking', 0.8],
-  ['Basis Trading', 0.7],
-  ['Insurance', 0.7],
-  ['Yield', 0.65],
-  ['Risk Curators', 0.55],
-  ['Stablecoin Wrapper', 0.5],
-  ['Onchain Capital Allocator', 0.5],
-  ['Governance Incentives', 0.4],
-  ['CEX', 0.4],
-];
+/** One category's learned multiple, with the live peers behind it. */
+export interface CategoryBenchmark {
+  category: string;
+  benchmark: number;
+  n: number;
+  median_mcap_tvl: number;
+}
 
-/** A category's multiple, or the documented default. Keyed on `category` only. */
-export function categoryFactor(category: string | null): number {
-  if (category === null) return 0.75;
-  for (const [name, factor] of CATEGORY_FACTORS) if (name === category) return factor;
-  return 0.75;
+/** The benchmark block: the global anchor, its sample and every category row. */
+export interface BenchmarkModel {
+  global_median_mcap_tvl: number;
+  sample_size: number;
+  shrink_prior: number;
+  benchmarks: CategoryBenchmark[];
 }
 
 /** The model's version label. */
-export const MODEL_VERSION = 'radar-2.0';
+export const MODEL_VERSION = 'radar-3.0-benchmark';
 
 /** How many pre-token protocols below the watchlist floor the early radar carries, by TVL. */
 export const EARLY_ROWS = 160;
@@ -131,8 +129,9 @@ export interface BoardRow {
   launch_score: number;
   confidence: 'high' | 'medium' | 'low';
   model: {
-    base_multiple: number;
-    category_factor: number;
+    benchmark: number;
+    category_n: number;
+    global_median_mcap_tvl: number;
     growth_pct: number;
     growth_factor: number;
     tenure_factor: number;
@@ -160,8 +159,8 @@ export interface RadarRow {
   confidence: 'high' | 'medium' | 'low';
   watchlist: boolean;
   factors: {
-    base_multiple: number;
-    category_factor: number;
+    benchmark: number;
+    category_n: number;
     growth_pct: number;
     growth_factor: number;
     tenure_factor: number;
@@ -179,6 +178,7 @@ export interface LiveRow {
   chains: string[];
   tvl_usd: number;
   mcap_usd: number | null;
+  mcap_tvl_ratio: number | null;
   change_7d: number | null;
   symbol: string | null;
 }
@@ -190,7 +190,9 @@ export interface RadarData {
   floor_usd: number;
   model: ModelConstants;
   model_version: string;
-  category_factors: ReadonlyArray<readonly [string, number]>;
+  global_median_mcap_tvl: number;
+  benchmark_sample_size: number;
+  benchmarks: CategoryBenchmark[];
   watchlist_size: number;
   board_size: number;
   early_size: number;
@@ -216,6 +218,66 @@ function finite(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+/** The median of a non-empty numeric list; the mean of the two middle values when even. */
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = values.slice().sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/** The bucket key a protocol's category sorts into; a null category is "Other". */
+export function categoryKey(category: string | null): string {
+  return category === null || category === '' ? 'Other' : category;
+}
+
+/**
+ * Learn the benchmark table from the snapshot's own live-token protocols. Only protocols with a
+ * market cap and a positive TVL carry a ratio. The protocol's category is the only key.
+ */
+export function computeBenchmarks(snapshot: Snapshot, model: ModelConstants = MODEL): BenchmarkModel {
+  const ratios = new Map<string, number[]>();
+  const all: number[] = [];
+  for (const p of snapshot.protocols) {
+    if (p.mcap_usd === null || p.tvl_usd <= 0) continue;
+    const ratio = p.mcap_usd / p.tvl_usd;
+    if (!Number.isFinite(ratio)) continue;
+    all.push(ratio);
+    const key = categoryKey(p.category);
+    const list = ratios.get(key);
+    if (list === undefined) ratios.set(key, [ratio]);
+    else list.push(ratio);
+  }
+  const global = median(all);
+  const clamp = (v: number): number => Math.min(model.benchmark_cap, Math.max(model.benchmark_floor, v));
+  const benchmarks: CategoryBenchmark[] = [];
+  for (const [category, values] of ratios) {
+    const n = values.length;
+    const catMedian = median(values);
+    const shrunk = (n * catMedian + model.shrink_prior * global) / (n + model.shrink_prior);
+    benchmarks.push({
+      category,
+      benchmark: round4(clamp(shrunk)),
+      n,
+      median_mcap_tvl: round4(catMedian),
+    });
+  }
+  benchmarks.sort((a, b) => b.n - a.n || b.benchmark - a.benchmark || (a.category < b.category ? -1 : 1));
+  return {
+    global_median_mcap_tvl: round4(global),
+    sample_size: all.length,
+    shrink_prior: model.shrink_prior,
+    benchmarks,
+  };
+}
+
+/** A category's learned benchmark; a category with no live peer takes the global median. */
+export function benchmarkFor(category: string | null, bench: BenchmarkModel, model: ModelConstants = MODEL): { benchmark: number; n: number } {
+  const key = categoryKey(category);
+  for (const b of bench.benchmarks) if (b.category === key) return { benchmark: b.benchmark, n: b.n };
+  return { benchmark: Math.min(model.benchmark_cap, Math.max(model.benchmark_floor, bench.global_median_mcap_tvl)), n: 0 };
+}
+
 /** Whole days from `listed_at` to `as_of`, clamped at zero; null when either date is absent or bad. */
 export function ageDays(asOf: string, listedAt: string | null): number | null {
   if (listedAt === null) return null;
@@ -225,24 +287,49 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
-/** One protocol's factors and implied value under `model`. */
+/** One protocol's factors and implied value under `model` and the learned `bench`.
+ *  Returns `stage` = tvl x benchmark so the page can show the arithmetic in order. */
 export function impliedValue(
   protocol: SnapshotProtocol,
   asOf: string,
-  model: ModelConstants,
-): { implied: number; age: number | null; growthPct: number; growthFactor: number; tenureFactor: number; tenureBonus: number; breadthFactor: number; categoryFactor: number } {
+  bench: BenchmarkModel,
+  model: ModelConstants = MODEL,
+): {
+  implied: number;
+  age: number | null;
+  benchmark: number;
+  categoryN: number;
+  stage: number;
+  growthPct: number;
+  growthFactor: number;
+  tenureFactor: number;
+  tenureBonus: number;
+  breadthFactor: number;
+} {
   const age = ageDays(asOf, protocol.listed_at);
   const rawGrowth = protocol.change_7d === null ? 0 : finite(protocol.change_7d, 0);
   const growthPct = Math.min(model.growth_cap, Math.max(model.growth_floor, rawGrowth));
   const growthFactor = protocol.change_7d === null ? 1 : 1 + (growthPct / 100) * model.growth_weight;
   const ageForModel = age ?? model.unknown_age_days;
   const tenureBase = model.tenure_base + (Math.min(Math.max(ageForModel, 0), model.tenure_days) / model.tenure_days) * model.tenure_range;
-  const tenureBonus = Math.min(model.tenure_bonus_cap, 1 + model.tenure_bonus * Math.log10(1 + Math.max(ageForModel, 0) / 180));
-  const tenureFactor = tenureBase * tenureBonus;
+  const tenureBonus = 1 + model.tenure_bonus * Math.log10(1 + Math.max(ageForModel, 0) / model.tenure_bonus_days);
+  const tenureFactor = Math.min(model.tenure_bonus_cap, tenureBase * tenureBonus);
   const breadthFactor = 1 + model.breadth_weight * Math.min(protocol.chains.length, model.breadth_cap);
-  const cat = categoryFactor(protocol.category);
-  const implied = Math.max(1, Math.round(protocol.tvl_usd * model.base_multiple * cat * growthFactor * tenureFactor * breadthFactor));
-  return { implied, age, growthPct, growthFactor, tenureFactor, tenureBonus, breadthFactor, categoryFactor: cat };
+  const local = benchmarkFor(protocol.category, bench, model);
+  const stage = protocol.tvl_usd * local.benchmark;
+  const implied = Math.max(1, Math.round(stage * growthFactor * tenureFactor * breadthFactor));
+  return {
+    implied,
+    age,
+    benchmark: local.benchmark,
+    categoryN: local.n,
+    stage,
+    growthPct,
+    growthFactor,
+    tenureFactor,
+    tenureBonus,
+    breadthFactor,
+  };
 }
 
 /** Whether a protocol records no token at all. The snapshot's record is not proof it has none. */
@@ -258,16 +345,15 @@ export function isRankable(p: SnapshotProtocol): boolean {
   return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
 }
 
-/** Confidence from age and data completeness. */
-function confidenceFor(age: number | null, change7d: number | null): 'high' | 'medium' | 'low' {
+/** Confidence from age alone: high at two years, medium at six months, low otherwise. */
+function confidenceFor(age: number | null): 'high' | 'medium' | 'low' {
   if (age === null) return 'low';
-  let level: 'high' | 'medium' | 'low' = age >= 730 ? 'high' : age >= 180 ? 'medium' : 'low';
-  if (change7d === null && level === 'high') level = 'medium';
-  return level;
+  return age >= 730 ? 'high' : age >= 180 ? 'medium' : 'low';
 }
 
 /** The board's protocols, strongest first, with ranks 1..n. */
 export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
+  const bench = computeBenchmarks(snapshot, model);
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const chosen = new Map<string, SnapshotProtocol>();
   for (const slug of snapshot.watchlist) {
@@ -280,7 +366,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, model) }));
+  const scored = [...chosen.values()].map((p) => ({ p, ...impliedValue(p, snapshot.as_of, bench, model) }));
   scored.sort((a, b) => b.implied - a.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
   const values = scored.map((s) => s.implied).sort((a, b) => a - b);
   const n = scored.length;
@@ -315,10 +401,11 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     age_days: s.age,
     implied_value_usd: s.implied,
     launch_score: Math.min(100, Math.max(0, percentile(s.implied))),
-    confidence: confidenceFor(s.age, s.p.change_7d),
+    confidence: confidenceFor(s.age),
     model: {
-      base_multiple: model.base_multiple,
-      category_factor: round4(s.categoryFactor),
+      benchmark: round4(s.benchmark),
+      category_n: s.categoryN,
+      global_median_mcap_tvl: bench.global_median_mcap_tvl,
       growth_pct: round4(s.growthPct),
       growth_factor: round4(s.growthFactor),
       tenure_factor: round4(s.tenureFactor),
@@ -397,16 +484,11 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): string[] {
     `Create a fresh wallet for this position alone, fund it with $${capital + 20} of USDC on ${chain}, and store the seed phrase offline. Cost: ${gas.low}. Time: 10 minutes.`,
     action + ` Cost: $${capital} of capital plus ${gas.low}. Time: 15–20 minutes.`,
     `Record the position in a farm log with the date, the wallet address, the amount and the transaction hash, then repeat one qualifying action every week. Cost: under $2 of gas a week. Time: 10 minutes a week.`,
-    `Hold for at least ${hold} days so activity lands in more than one protocol snapshot; do not move the position between wallets to fake volume. Cost: the $${capital} stays locked in the position. Time: ${hold} days.`,
-    `Check ${name(p)}'s own site and social account for a points or rewards page before you withdraw, and claim only from the link the protocol publishes. Cost: nothing to check; never pay to claim. Time: 10 minutes.`,
+    `Sybil and risk check: keep one wallet per person, never fund it from an exchange account shared with other farmers, and do not move the position between wallets to fake volume. Cost: nothing. Time: 10 minutes.`,
+    `Hold for at least ${hold} days so activity lands in more than one protocol snapshot; check ${p.name}'s own site and social account for a points page before you withdraw, and claim only from the link the protocol publishes. Cost: the $${capital} stays locked; never pay to claim. Time: ${hold} days.`,
     `Withdraw in one transaction, keep ${gas.high} available for gas, and reconcile the farm log against the wallet's history. Cost: ${gas.high}. Time: 20 minutes.`,
   ];
   return steps.map((s) => (s.length > 600 ? `${s.slice(0, 596)}...` : s.length < 20 ? `${s} Hold and review.` : s));
-}
-
-/** The protocol's name, in one place so the plan reads naturally without special-casing it. */
-function name(p: SnapshotProtocol): string {
-  return p.name;
 }
 
 /** The live-token protocols by market cap, for the separate "Already trading" view. */
@@ -422,6 +504,7 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
       chains: p.chains,
       tvl_usd: p.tvl_usd,
       mcap_usd: p.mcap_usd,
+      mcap_tvl_ratio: p.tvl_usd > 0 && p.mcap_usd !== null ? round4(p.mcap_usd / p.tvl_usd) : null,
       change_7d: p.change_7d,
       symbol: p.symbol,
     }));
@@ -445,8 +528,8 @@ export function radarRow(row: BoardRow): RadarRow {
     confidence: row.confidence,
     watchlist: row.watchlist,
     factors: {
-      base_multiple: row.model.base_multiple,
-      category_factor: row.model.category_factor,
+      benchmark: row.model.benchmark,
+      category_n: row.model.category_n,
       growth_pct: row.model.growth_pct,
       growth_factor: row.model.growth_factor,
       tenure_factor: row.model.tenure_factor,
@@ -457,31 +540,28 @@ export function radarRow(row: BoardRow): RadarRow {
   };
 }
 
-function median(values: number[]): number {
-  if (values.length === 0) return 0;
-  const sorted = values.slice().sort((a, b) => a - b);
-  const mid = sorted.length >> 1;
-  return sorted.length % 2 === 1 ? sorted[mid]! : Math.round((sorted[mid - 1]! + sorted[mid]!) / 2);
-}
-
 /** Everything the dashboard renders, computed from the snapshot. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
+  const bench = computeBenchmarks(snapshot, model);
   const board = buildBoard(snapshot, model);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !r.watchlist).length;
+  const tvls = board.map((r) => r.tvl_usd).sort((a, b) => a - b);
   const radar: RadarData = {
     as_of: snapshot.as_of,
     source: snapshot.source,
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
-    category_factors: CATEGORY_FACTORS,
+    global_median_mcap_tvl: bench.global_median_mcap_tvl,
+    benchmark_sample_size: bench.sample_size,
+    benchmarks: bench.benchmarks,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: early,
     live_size: live.length,
     total_implied_usd: board.reduce((sum, r) => sum + r.implied_value_usd, 0),
-    median_tvl_usd: median(board.map((r) => r.tvl_usd)),
+    median_tvl_usd: median(tvls),
     aged_two_years: board.filter((r) => (r.age_days ?? 0) >= 730).length,
     rows: board.map(radarRow),
     live,
