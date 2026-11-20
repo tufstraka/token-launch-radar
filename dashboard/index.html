@@ -3,12 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar: pre-token protocols ranked by implied value</title>
+<title>TOKEN RADAR — pre-token launch board</title>
+<meta name="description" content="A radar for protocols that record no token: implied launch value, rank, confidence and a farm plan for each.">
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<a class="skip" href="#board">Skip to the board</a>
-<main id="board" tabindex="-1" aria-busy="true"></main>
+<div class="scan" aria-hidden="true"></div>
+<div id="app" aria-live="polite"></div>
+<noscript><p class="noscript">TOKEN RADAR needs JavaScript to render the board. The data is in board.json beside the dashboard.</p></noscript>
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>
